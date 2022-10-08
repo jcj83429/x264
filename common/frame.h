@@ -82,6 +82,7 @@ typedef struct x264_frame
     pixel *filtered[3][4]; /* plane[0], H, V, HV */
     pixel *filtered_fld[3][4];
     pixel *lowres[4]; /* half-size copy of input frame: Orig, H, V, HV */
+    pixel *lookahead_recon; /* full-res reconstructed buffer used in TPL */
     uint16_t *integral;
 
     /* for unrestricted mv we allocate more data than needed

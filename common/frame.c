@@ -218,6 +218,9 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
             for( int j = 0; j <= h->param.i_bframe+1; j++ )
                 for( int i = 0; i <= h->param.i_bframe+1; i++ )
                     PREALLOC( frame->lowres_costs[j][i], i_mb_count * sizeof(uint16_t) );
+
+            int64_t full_luma_plane_size = align_plane_size( frame->i_stride[0] * (frame->i_lines[0] + 2*i_padv), disalign );
+            PREALLOC( frame->lookahead_recon, full_luma_plane_size * SIZEOF_PIXEL );
         }
         if( h->param.rc.i_aq_mode )
         {

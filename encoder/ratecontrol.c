@@ -1430,6 +1430,7 @@ void x264_ratecontrol_zone_init( x264_t *h )
 /* Before encoding a frame, choose a QP for it */
 void x264_ratecontrol_start( x264_t *h, int i_force_qp, int overhead )
 {
+    printf("ratecontrol %d\n", h->fenc->i_frame);
     x264_ratecontrol_t *rc = h->rc;
     ratecontrol_entry_t *rce = NULL;
     x264_zone_t *zone = get_zone( h, h->fenc->i_frame );

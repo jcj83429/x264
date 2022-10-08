@@ -42,6 +42,35 @@ void x264_weights_analyse( x264_t *h, x264_frame_t *fenc, x264_frame_t *ref, int
 #include "slicetype-cl.h"
 #endif
 
+static void dump_lookahead_frames( x264_t *h, x264_frame_t **frames, int num_frames )
+{
+    static int framecount = 0;
+    static FILE *fp;
+
+    if( framecount == 0 ) {
+        // write Y4M header
+        fp = fopen("/mnt/c/Users/Jason/Downloads/lookahead.y4m", "wb");
+        fprintf(fp, "YUV4MPEG2 W%d H%d F50:1 Ip A1:1 Cmono\n", h->param.i_width, h->param.i_height);
+    }
+    for(int i = 0; i < num_frames; i++) {
+        x264_frame_t *frame = frames[i];
+        if(frame->i_frame < framecount){
+            continue;
+        }
+        fprintf(fp, "FRAME\n");
+        for(int y = 0; y < h->param.i_height; y++) {
+            int row_start = y * frame->i_stride[0];
+            fwrite(frame->plane[0] + row_start, h->param.i_width, 1, fp);
+        }
+        fprintf(fp, "FRAME\n");
+        for(int y = 0; y < h->param.i_height; y++) {
+            int row_start = y * frame->i_stride[0];
+            fwrite(frame->lookahead_recon + row_start, h->param.i_width, 1, fp);
+        }
+        framecount++;
+    }
+}
+
 static void lowres_context_init( x264_t *h, x264_mb_analysis_t *a )
 {
     a->i_qp = X264_LOOKAHEAD_QP;
@@ -1090,6 +1119,7 @@ static void macroblock_tree_propagate( x264_t *h, x264_frame_t **frames, float a
 
 static void macroblock_tree( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int num_frames, int b_intra )
 {
+    printf("mbtree %d+%d\n", frames[0]->i_frame, num_frames);
     int idx = !b_intra;
     int last_nonb, cur_nonb = 1;
     int bframes = 0;
@@ -1181,6 +1211,8 @@ static void macroblock_tree( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **fr
     macroblock_tree_finish( h, frames[last_nonb], average_duration, last_nonb );
     if( h->param.i_bframe_pyramid && bframes > 1 && !h->param.rc.i_vbv_buffer_size )
         macroblock_tree_finish( h, frames[last_nonb+(bframes+1)/2], average_duration, 0 );
+
+    dump_lookahead_frames( h, frames, num_frames );
 }
 
 static int vbv_frame_cost( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int p0, int p1, int b )
