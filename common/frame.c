@@ -221,6 +221,7 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
 
             int64_t full_luma_plane_size = align_plane_size( frame->i_stride[0] * (frame->i_lines[0] + 2*i_padv), disalign );
             PREALLOC( frame->lookahead_recon, full_luma_plane_size * SIZEOF_PIXEL );
+            PREALLOC( frame->i_lookahead_intra_mode, i_mb_count*sizeof(int8_t) );
         }
         if( h->param.rc.i_aq_mode )
         {
@@ -293,6 +294,7 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
             if( h->param.rc.i_aq_mode )
                 /* shouldn't really be initialized, just silences a valgrind false-positive in x264_mbtree_propagate_cost_sse2 */
                 memset( frame->i_inv_qscale_factor, 0, i_mb_count * sizeof(uint16_t) );
+            frame->lookahead_recon += frame->i_stride[0] * i_padv + PADH_ALIGN;
         }
     }
 

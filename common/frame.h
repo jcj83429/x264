@@ -134,6 +134,7 @@ typedef struct x264_frame
     float   *f_qp_offset_aq;
     int     b_intra_calculated;
     uint16_t *i_intra_cost;
+    int8_t   *i_lookahead_intra_mode;
     uint16_t *i_propagate_cost;
     uint16_t *i_inv_qscale_factor;
     int     b_scenecut; /* Set to zero if the frame cannot possibly be part of a real scenecut. */

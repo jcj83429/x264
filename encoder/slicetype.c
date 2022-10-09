@@ -50,18 +50,19 @@ static void dump_lookahead_frames( x264_t *h, x264_frame_t **frames, int num_fra
     if( nextframe == 0 ) {
         // write Y4M header
         fp = fopen("/mnt/c/Users/Jason/Downloads/lookahead.y4m", "wb");
-        fprintf(fp, "YUV4MPEG2 W%d H%d F50:1 Ip A1:1 Cmono\n", h->param.i_width, h->param.i_height);
+        fprintf(fp, "YUV4MPEG2 W%d H%d F%d:%d Ip A1:1 Cmono\n",
+                h->param.i_width, h->param.i_height, h->param.i_fps_num, h->param.i_fps_den);
     }
     for(int i = 0; i < num_frames; i++) {
         x264_frame_t *frame = frames[i];
         if(frame->i_frame < nextframe){
             continue;
         }
-        fprintf(fp, "FRAME\n");
-        for(int y = 0; y < h->param.i_height; y++) {
-            int row_start = y * frame->i_stride[0];
-            fwrite(frame->plane[0] + row_start, h->param.i_width, 1, fp);
-        }
+        /* fprintf(fp, "FRAME\n"); */
+        /* for(int y = 0; y < h->param.i_height; y++) { */
+        /*     int row_start = y * frame->i_stride[0]; */
+        /*     fwrite(frame->plane[0] + row_start, h->param.i_width, 1, fp); */
+        /* } */
         fprintf(fp, "FRAME\n");
         for(int y = 0; y < h->param.i_height; y++) {
             int row_start = y * frame->i_stride[0];
@@ -756,24 +757,31 @@ lowres_intra_mb:
             M32( &pix[i*FDEC_STRIDE-pixoff] ) = M32( &src[i*i_stride-pixoff] );
 
         h->pixf.intra_mbcmp_x3_8x8c( h->mb.pic.p_fenc[0], pix, satds );
-        int i_icost = X264_MIN3( satds[0], satds[1], satds[2] );
+        int i_icost = satds[2];
+        int best_intra_mode = I_PRED_8x8_DC;
+        if( i_mb_y )
+            COPY2_IF_LT( i_icost, satds[0], best_intra_mode, I_PRED_8x8_V );
+        if( i_mb_x )
+            COPY2_IF_LT( i_icost, satds[1], best_intra_mode, I_PRED_8x8_H );
 
-        if( h->param.analyse.i_subpel_refine > 1 )
+        if( h->param.analyse.i_subpel_refine > 1 && i_mb_x && i_mb_y )
         {
             h->predict_8x8c[I_PRED_CHROMA_P]( pix );
             int satd = h->pixf.mbcmp[PIXEL_8x8]( h->mb.pic.p_fenc[0], FENC_STRIDE, pix, FDEC_STRIDE );
-            i_icost = X264_MIN( i_icost, satd );
+            // the plane mode is not a valid mode for 8x8, so use -1 to represent it
+            COPY2_IF_LT( i_icost, satd, best_intra_mode, -1 );
             h->predict_8x8_filter( pix, edge, ALL_NEIGHBORS, ALL_NEIGHBORS );
             for( int i = 3; i < 9; i++ )
             {
                 h->predict_8x8[i]( pix, edge );
                 satd = h->pixf.mbcmp[PIXEL_8x8]( h->mb.pic.p_fenc[0], FENC_STRIDE, pix, FDEC_STRIDE );
-                i_icost = X264_MIN( i_icost, satd );
+                COPY2_IF_LT( i_icost, satd, best_intra_mode, i );
             }
         }
 
         i_icost = ((i_icost + intra_penalty) >> (BIT_DEPTH - 8)) + lowres_penalty;
         fenc->i_intra_cost[i_mb_xy] = i_icost;
+        fenc->i_lookahead_intra_mode[i_mb_xy] = best_intra_mode;
         int i_icost_aq = i_icost;
         if( h->param.rc.i_aq_mode )
             i_icost_aq = (i_icost_aq * fenc->i_inv_qscale_factor[i_mb_xy] + 128) >> 8;
@@ -1219,6 +1227,9 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
     x264_frame_t *ref1 = frames[p1];
     int i_stride = frame->i_stride[0];
 
+    ALIGNED_ARRAY_16( pixel, pix1,[17*FDEC_STRIDE] );
+    pixel *pix = &pix1[16+FDEC_STRIDE];
+
     memset(frame->lookahead_recon, 0, frame->i_lines[0] * i_stride);
     for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
     {
@@ -1226,11 +1237,62 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
         {
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
             int list_used = frame->lowres_costs[b-p0][0][mb_xy] >> LOWRES_COST_SHIFT;
+            const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
+
             if( !list_used )
             {
-                // XXX intra
+                // copy the top and left pixels
+                memcpy(pix - FDEC_STRIDE, frame->plane[0] + dst_pel_offset - i_stride, 24);
+                for( int i = -1; i < 16; i++ )
+                {
+                    pix[i*FDEC_STRIDE - 1] = frame->plane[0][dst_pel_offset + i*i_stride - 1];
+                }
+                int intra_mode = frame->i_lookahead_intra_mode[mb_xy];
+                if( intra_mode < 3 )
+                {
+                    // non-directional modes
+                    // plane prediction is stored as -1 in intra_mode
+                    if( intra_mode < 0 )
+                        intra_mode = I_PRED_16x16_P;
+                    if( intra_mode == I_PRED_16x16_DC )
+                    {
+                        if( mb_x == 0 )
+                        {
+                            if( mb_y == 0 )
+                                intra_mode = I_PRED_16x16_DC_128;
+                            else
+                                intra_mode = I_PRED_16x16_DC_TOP;
+                        }
+                        else if( mb_y == 0 )
+                            intra_mode = I_PRED_16x16_DC_LEFT;
+                    }
+                    h->predict_16x16[intra_mode]( pix );
+                }
+                else
+                {
+                    for( int y = 0; y < 2; y++ )
+                    {
+                        if( y == 1 ) {
+                            // extend top right
+                            pixel *tr = pix + 15 + 7 * FDEC_STRIDE;
+                            for(int i = 1; i <= 8; i++)
+                                tr[i] = tr[0];
+                        }
+                        for( int x = 0; x < 2; x++ )
+                        {
+                            pixel *pix8x8 = pix + 8 * (x + y * FDEC_STRIDE);
+                            pixel edge[36];
+                            h->predict_8x8_filter( pix8x8, edge, ALL_NEIGHBORS, ALL_NEIGHBORS );
+                            h->predict_8x8[intra_mode]( pix8x8, edge );
+                        }
+                    }
+                }
+                h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
+                                         pix, FDEC_STRIDE, 16 );
+
                 continue;
             }
+
             int16_t mvs[2][2];
             if( list_used & 1 )
             {
@@ -1242,8 +1304,6 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                 mvs[1][0] = frame->lowres_mvs[0][p1-b-1][mb_xy][0] / 2;
                 mvs[1][1] = frame->lowres_mvs[0][p1-b-1][mb_xy][1] / 2;
             }
-
-            const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
 
             if( list_used == 3 ) {
                 int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
