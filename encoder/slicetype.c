@@ -57,10 +57,6 @@ static void dump_lookahead_frames( x264_t *h, x264_frame_t **frames, int num_fra
         if(frame->i_frame < nextframe){
             continue;
         }
-        if( IS_X264_TYPE_B( frame->i_type ) )
-        {
-            continue;
-        }
         fprintf(fp, "FRAME\n");
         for(int y = 0; y < h->param.i_height; y++) {
             int row_start = y * frame->i_stride[0];
@@ -1216,60 +1212,119 @@ static void macroblock_tree( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **fr
         macroblock_tree_finish( h, frames[last_nonb+(bframes+1)/2], average_duration, 0 );
 }
 
+static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, int b )
+{
+    x264_frame_t *frame = frames[b];
+    x264_frame_t *ref0 = frames[p0];
+    x264_frame_t *ref1 = frames[p1];
+    int i_stride = frame->i_stride[0];
+
+    memset(frame->lookahead_recon, 0, frame->i_lines[0] * i_stride);
+    for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
+    {
+        for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
+        {
+            int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
+            int list_used = frame->lowres_costs[b-p0][0][mb_xy] >> LOWRES_COST_SHIFT;
+            if( !list_used )
+            {
+                // XXX intra
+                continue;
+            }
+            int16_t mvs[2][2];
+            if( list_used & 1 )
+            {
+                mvs[0][0] = frame->lowres_mvs[0][b-p0-1][mb_xy][0] / 2;
+                mvs[0][1] = frame->lowres_mvs[0][b-p0-1][mb_xy][1] / 2;
+            }
+            if( p1-b > 0 && list_used & 2 )
+            {
+                mvs[1][0] = frame->lowres_mvs[0][p1-b-1][mb_xy][0] / 2;
+                mvs[1][1] = frame->lowres_mvs[0][p1-b-1][mb_xy][1] / 2;
+            }
+
+            const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
+
+            if( list_used == 3 ) {
+                int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
+                int src_pel_offset_1 = dst_pel_offset + mvs[1][0] + mvs[1][1] * i_stride;
+                h->mc.avg[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
+                                        ref0->plane[0] + src_pel_offset_0, i_stride,
+                                        ref1->plane[0] + src_pel_offset_1, i_stride,
+                                        32 ); // XXX calculate bipred weight properly
+            } else {
+                int16_t mvx, mvy;
+                x264_frame_t *ref;
+                if( list_used & 1 )
+                {
+                    mvx = mvs[0][0];
+                    mvy = mvs[0][1];
+                    ref = ref0;
+                }
+                else
+                {
+                    mvx = mvs[1][0];
+                    mvy = mvs[1][1];
+                    ref = ref1;
+                }
+                int src_pel_offset = dst_pel_offset + mvx + mvy * i_stride;
+
+                h->mc.copy_16x16_unaligned( frame->lookahead_recon + dst_pel_offset, i_stride,
+                                            ref->plane[0] + src_pel_offset, i_stride,
+                                            16 );
+            }
+        }
+    }
+}
+
 static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int num_frames, int b_intra )
 {
     printf("mbtree %d+%d\n", frames[0]->i_frame, num_frames);
     int cur_nonb = 0;
-    while(cur_nonb < num_frames)
-    {
-        while( IS_X264_TYPE_B( frames[cur_nonb]->i_type ) && cur_nonb < num_frames )
-            cur_nonb++;
-        if( cur_nonb >= num_frames )
-            break;
+    while( cur_nonb < num_frames && IS_X264_TYPE_B( frames[cur_nonb]->i_type ) )
+        cur_nonb++;
 
+    while( cur_nonb < num_frames )
+    {
         int next_nonb = cur_nonb + 1;
-        while( IS_X264_TYPE_B( frames[next_nonb]->i_type ) && next_nonb < num_frames )
+        while( next_nonb < num_frames && IS_X264_TYPE_B( frames[next_nonb]->i_type ) )
             next_nonb++;
         if( next_nonb >= num_frames )
             break;
 
         // recon next P frame
         slicetype_frame_cost( h, a, frames, cur_nonb, next_nonb, next_nonb );
-        x264_frame_t *frame = frames[next_nonb];
-        x264_frame_t *p0 = frames[cur_nonb];
+        tpl_recon_frame(h, frames, cur_nonb, next_nonb, next_nonb );
 
-        memset(frame->lookahead_recon, 0, frame->i_lines[0] * frame->i_stride[0]);
-        for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
+        int bframes = next_nonb - cur_nonb;
+        if( h->param.i_bframe_pyramid && bframes > 1 )
         {
-            for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
-            {
-                int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
-                int list_used = frame->lowres_costs[next_nonb-cur_nonb][0][mb_xy] >> LOWRES_COST_SHIFT;
-                if( !list_used )
-                {
-                    // XXX intra
+            int middle = (bframes + 1)/2 + cur_nonb;
+            slicetype_frame_cost( h, a, frames, cur_nonb, next_nonb, middle );
+            tpl_recon_frame( h, frames, cur_nonb, next_nonb, middle );
+            for( int b = cur_nonb+1; b < next_nonb; b++ ) {
+                if( b == middle )
                     continue;
-                }
-                int16_t mvs[2][2];
-                if( list_used & 1 )
-                {
-                    mvs[0][0] = frame->lowres_mvs[0][next_nonb - cur_nonb - 1][mb_xy][0];
-                    mvs[0][1] = frame->lowres_mvs[0][next_nonb - cur_nonb - 1][mb_xy][1];
-                }
 
-                const int dst_pel_offset = 16 * (mb_x + mb_y * frame->i_stride[0]);
-                int src_pel_offset = dst_pel_offset;
-                src_pel_offset += mvs[0][0] / 2 + mvs[0][1] / 2 * frame->i_stride[0];
-                h->mc.copy_16x16_unaligned( frame->lookahead_recon + dst_pel_offset, frame->i_stride[0],
-                                       p0->plane[0] + src_pel_offset, frame->i_stride[0],
-                                       16 );
+                int p0 = b > middle ? middle : cur_nonb;
+                int p1 = b > middle ? next_nonb : middle;
+                slicetype_frame_cost( h, a, frames, p0, p1, b );
+                tpl_recon_frame(h, frames, p0, p1, b );
+            }
+        }
+        else
+        {
+            for( int b = cur_nonb+1; b < next_nonb; b++ )
+            {
+                slicetype_frame_cost( h, a, frames, cur_nonb, next_nonb, b );
+                tpl_recon_frame(h, frames, cur_nonb, next_nonb, b );
             }
         }
 
         cur_nonb = next_nonb;
     }
     
-    dump_lookahead_frames( h, frames, num_frames );
+    dump_lookahead_frames( h, frames, cur_nonb + 1 );
 }
 
 static int vbv_frame_cost( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int p0, int p1, int b )
