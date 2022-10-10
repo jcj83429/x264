@@ -1230,7 +1230,7 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
     ALIGNED_ARRAY_16( pixel, pixd1,[17*FDEC_STRIDE] );
     pixel *pixd = &pixd1[16+FDEC_STRIDE];
     ALIGNED_ARRAY_16( pixel, pixe,[16*FENC_STRIDE] );
-    dctcoef dct[4][64];
+    ALIGNED_ARRAY_64( dctcoef, dct, [4],[64] );
 
     int i_qp = 40; // XXX use real quantizer from ratecontrol
 
@@ -1243,7 +1243,7 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
         for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
         {
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
-            int list_used = frame->lowres_costs[b-p0][0][mb_xy] >> LOWRES_COST_SHIFT;
+            int list_used = frame->lowres_costs[b-p0][p1-b][mb_xy] >> LOWRES_COST_SHIFT;
             const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
             int cost_srcref = COST_MAX; // distortion with uncompressed reference frames
             int cost_recref = COST_MAX; // distortion with compressed reference frames
@@ -1328,8 +1328,8 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                 }
                 if( p1-b > 0 && list_used & 2 )
                 {
-                    mvs[1][0] = frame->lowres_mvs[0][p1-b-1][mb_xy][0] / 2;
-                    mvs[1][1] = frame->lowres_mvs[0][p1-b-1][mb_xy][1] / 2;
+                    mvs[1][0] = frame->lowres_mvs[1][p1-b-1][mb_xy][0] / 2;
+                    mvs[1][1] = frame->lowres_mvs[1][p1-b-1][mb_xy][1] / 2;
                 }
 
                 // Use the recon refs first and finish with the source refs.
