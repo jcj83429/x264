@@ -134,9 +134,11 @@ typedef struct x264_frame
     float   *f_qp_offset_aq;
     int     b_intra_calculated;
     uint16_t *i_intra_cost;
-    int8_t   *i_lookahead_intra_mode;
     uint16_t *i_propagate_cost;
     uint16_t *i_inv_qscale_factor;
+    int8_t  *i_lookahead_intra_mode;
+    int     *i_srcref_cost;
+    int     *i_recref_cost;
     int     b_scenecut; /* Set to zero if the frame cannot possibly be part of a real scenecut. */
     float   f_weighted_cost_delta[X264_BFRAME_MAX+2];
     uint32_t i_pixel_sum[3];

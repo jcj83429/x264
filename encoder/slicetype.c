@@ -1234,6 +1234,9 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
 
     int i_qp = 40; // XXX use real quantizer from ratecontrol
 
+    int64_t total_cost_srcref = 0;
+    int64_t total_cost_recref = 0;
+    
     memset(frame->lookahead_recon, 0, frame->i_lines[0] * i_stride);
     for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
     {
@@ -1242,6 +1245,8 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
             int list_used = frame->lowres_costs[b-p0][0][mb_xy] >> LOWRES_COST_SHIFT;
             const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
+            int cost_srcref = COST_MAX; // distortion with uncompressed reference frames
+            int cost_recref = COST_MAX; // distortion with compressed reference frames
             h->mc.copy[PIXEL_16x16]( pixe, FENC_STRIDE,
                                      frame->plane[0] + dst_pel_offset, i_stride, 16 );
 
@@ -1310,13 +1315,11 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                         }
                     }
                 }
+                // For intra, the cost doesn't depends on the reference frames
+                cost_srcref = cost_recref = h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE );
             }
             else
             {
-                // TODO: do the inter predict and residual twice,
-                // once with original reference and once with compressed reference.
-                pixel *ref0buf = ref0->lookahead_recon;
-                pixel *ref1buf = ref1->lookahead_recon;
                 int16_t mvs[2][2];
                 if( list_used & 1 )
                 {
@@ -1329,49 +1332,70 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     mvs[1][1] = frame->lowres_mvs[0][p1-b-1][mb_xy][1] / 2;
                 }
 
-                if( list_used == 3 ) {
-                    int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
-                    int src_pel_offset_1 = dst_pel_offset + mvs[1][0] + mvs[1][1] * i_stride;
-                    h->mc.avg[PIXEL_16x16]( pixd, FDEC_STRIDE,
-                                            ref0buf + src_pel_offset_0, i_stride,
-                                            ref1buf + src_pel_offset_1, i_stride,
-                                            32 ); // XXX calculate bipred weight properly
-                } else {
-                    int16_t mvx, mvy;
-                    pixel *refbuf;
-                    if( list_used & 1 )
-                    {
-                        mvx = mvs[0][0];
-                        mvy = mvs[0][1];
-                        refbuf = ref0buf;
-                    }
-                    else
-                    {
-                        mvx = mvs[1][0];
-                        mvy = mvs[1][1];
-                        refbuf = ref1buf;
-                    }
-                    int src_pel_offset = dst_pel_offset + mvx + mvy * i_stride;
-
-                    h->mc.copy_16x16_unaligned( pixd, FDEC_STRIDE,
-                                                refbuf + src_pel_offset, i_stride,
-                                                16 );
-                }
-
-                h->dctf.sub16x16_dct8( dct, pixe, pixd );
-                for( int i = 0; i < 4; i++ )
+                // Use the recon refs first and finish with the source refs.
+                // This way we put the source-referenced recon block into lookahead_recon
+                for( int use_recon_refs = 1; use_recon_refs >= 0; use_recon_refs-- )
                 {
-                    h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8PY][i_qp], h->quant8_bias[CQM_8PY][i_qp] );
-                    h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8PY], i_qp );
+                    pixel *ref0buf = use_recon_refs ? ref0->lookahead_recon : ref0->plane[0];
+                    pixel *ref1buf = use_recon_refs ? ref1->lookahead_recon : ref1->plane[0];
+                    if( list_used == 3 ) {
+                        int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
+                        int src_pel_offset_1 = dst_pel_offset + mvs[1][0] + mvs[1][1] * i_stride;
+                        h->mc.avg[PIXEL_16x16]( pixd, FDEC_STRIDE,
+                                                ref0buf + src_pel_offset_0, i_stride,
+                                                ref1buf + src_pel_offset_1, i_stride,
+                                                32 ); // XXX calculate bipred weight properly
+                    } else {
+                        int16_t mvx, mvy;
+                        pixel *refbuf;
+                        if( list_used & 1 )
+                        {
+                            mvx = mvs[0][0];
+                            mvy = mvs[0][1];
+                            refbuf = ref0buf;
+                        }
+                        else
+                        {
+                            mvx = mvs[1][0];
+                            mvy = mvs[1][1];
+                            refbuf = ref1buf;
+                        }
+                        int src_pel_offset = dst_pel_offset + mvx + mvy * i_stride;
+
+                        h->mc.copy_16x16_unaligned( pixd, FDEC_STRIDE,
+                                                    refbuf + src_pel_offset, i_stride,
+                                                    16 );
+                    }
+
+                    h->dctf.sub16x16_dct8( dct, pixe, pixd );
+                    for( int i = 0; i < 4; i++ )
+                    {
+                        h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8PY][i_qp], h->quant8_bias[CQM_8PY][i_qp] );
+                        h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8PY], i_qp );
+                    }
+                    h->dctf.add16x16_idct8( pixd, dct );
+                    int cost = h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE );
+
+                    if( use_recon_refs )
+                        cost_recref = cost;
+                    else
+                        cost_srcref = cost;
                 }
-                h->dctf.add16x16_idct8( pixd, dct );
             }
 
             h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
                                      pixd, FDEC_STRIDE, 16 );
+            if( cost_srcref > cost_recref )
+                cost_srcref = cost_recref;
+            total_cost_srcref += cost_srcref;
+            total_cost_recref += cost_recref;
+            frame->i_srcref_cost[mb_xy] = cost_srcref;
+            frame->i_recref_cost[mb_xy] = cost_recref;
         }
     }
     x264_frame_expand_border_lookahead_recon( frame );
+
+    printf("cost_src: %ld, cost_rec: %ld\n", total_cost_srcref, total_cost_recref);
 }
 
 static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int num_frames, int b_intra )
