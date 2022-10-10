@@ -635,6 +635,8 @@ void x264_frame_expand_border_lowres( x264_frame_t *frame )
 {
     for( int i = 0; i < 4; i++ )
         plane_expand_border( frame->lowres[i], frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres, PADH, PADV, 1, 1, 0 );
+    // also expand the borders of the source frame for use by lookahead_recon, which uses the lowres mvs
+    plane_expand_border( frame->plane[0], frame->i_stride[0], frame->i_width[0], frame->i_lines[0], PADH, PADV, 1, 1, 0 );
 }
 
 void x264_frame_expand_border_lookahead_recon( x264_frame_t *frame )
