@@ -1320,16 +1320,19 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
             }
             else
             {
-                int16_t mvs[2][2];
+                int ref0_pel_offset = 0;
+                int ref1_pel_offset = 0;
                 if( list_used & 1 )
                 {
-                    mvs[0][0] = frame->lowres_mvs[0][b-p0-1][mb_xy][0] / 2;
-                    mvs[0][1] = frame->lowres_mvs[0][b-p0-1][mb_xy][1] / 2;
+                    int x = frame->lowres_mvs[0][b-p0-1][mb_xy][0] / 2;
+                    int y = frame->lowres_mvs[0][b-p0-1][mb_xy][1] / 2;
+                    ref0_pel_offset = dst_pel_offset + x + y * i_stride;
                 }
                 if( p1-b > 0 && list_used & 2 )
                 {
-                    mvs[1][0] = frame->lowres_mvs[1][p1-b-1][mb_xy][0] / 2;
-                    mvs[1][1] = frame->lowres_mvs[1][p1-b-1][mb_xy][1] / 2;
+                    int x = frame->lowres_mvs[1][p1-b-1][mb_xy][0] / 2;
+                    int y = frame->lowres_mvs[1][p1-b-1][mb_xy][1] / 2;
+                    ref1_pel_offset = dst_pel_offset + x + y * i_stride;
                 }
 
                 // Use the recon refs first and finish with the source refs.
@@ -1339,31 +1342,25 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     pixel *ref0buf = use_recon_refs ? ref0->lookahead_recon : ref0->plane[0];
                     pixel *ref1buf = use_recon_refs ? ref1->lookahead_recon : ref1->plane[0];
                     if( list_used == 3 ) {
-                        int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
-                        int src_pel_offset_1 = dst_pel_offset + mvs[1][0] + mvs[1][1] * i_stride;
                         h->mc.avg[PIXEL_16x16]( pixd, FDEC_STRIDE,
-                                                ref0buf + src_pel_offset_0, i_stride,
-                                                ref1buf + src_pel_offset_1, i_stride,
+                                                ref0buf + ref0_pel_offset, i_stride,
+                                                ref1buf + ref1_pel_offset, i_stride,
                                                 32 ); // XXX calculate bipred weight properly
                     } else {
-                        int16_t mvx, mvy;
                         pixel *refbuf;
+                        int ref_pel_offset;
                         if( list_used & 1 )
                         {
-                            mvx = mvs[0][0];
-                            mvy = mvs[0][1];
                             refbuf = ref0buf;
+                            ref_pel_offset = ref0_pel_offset;
                         }
                         else
                         {
-                            mvx = mvs[1][0];
-                            mvy = mvs[1][1];
                             refbuf = ref1buf;
+                            ref_pel_offset = ref1_pel_offset;
                         }
-                        int src_pel_offset = dst_pel_offset + mvx + mvy * i_stride;
-
                         h->mc.copy_16x16_unaligned( pixd, FDEC_STRIDE,
-                                                    refbuf + src_pel_offset, i_stride,
+                                                    refbuf + ref_pel_offset, i_stride,
                                                     16 );
                     }
 
