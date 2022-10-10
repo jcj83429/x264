@@ -1227,8 +1227,12 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
     x264_frame_t *ref1 = frames[p1];
     int i_stride = frame->i_stride[0];
 
-    ALIGNED_ARRAY_16( pixel, pix1,[17*FDEC_STRIDE] );
-    pixel *pix = &pix1[16+FDEC_STRIDE];
+    ALIGNED_ARRAY_16( pixel, pixd1,[17*FDEC_STRIDE] );
+    pixel *pixd = &pixd1[16+FDEC_STRIDE];
+    ALIGNED_ARRAY_16( pixel, pixe,[16*FENC_STRIDE] );
+    dctcoef dct[4][64];
+
+    int i_qp = 40; // XXX use real quantizer from ratecontrol
 
     memset(frame->lookahead_recon, 0, frame->i_lines[0] * i_stride);
     for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
@@ -1238,14 +1242,16 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
             int list_used = frame->lowres_costs[b-p0][0][mb_xy] >> LOWRES_COST_SHIFT;
             const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
+            h->mc.copy[PIXEL_16x16]( pixe, FENC_STRIDE,
+                                     frame->plane[0] + dst_pel_offset, i_stride, 16 );
 
             if( !list_used )
             {
                 // copy the top and left pixels
-                memcpy(pix - FDEC_STRIDE, frame->plane[0] + dst_pel_offset - i_stride, 24);
+                memcpy(pixd - FDEC_STRIDE, frame->plane[0] + dst_pel_offset - i_stride, 24);
                 for( int i = -1; i < 16; i++ )
                 {
-                    pix[i*FDEC_STRIDE - 1] = frame->plane[0][dst_pel_offset + i*i_stride - 1];
+                    pixd[i*FDEC_STRIDE - 1] = frame->plane[0][dst_pel_offset + i*i_stride - 1];
                 }
                 int intra_mode = frame->i_lookahead_intra_mode[mb_xy];
                 if( intra_mode < 3 )
@@ -1266,7 +1272,16 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                         else if( mb_y == 0 )
                             intra_mode = I_PRED_16x16_DC_LEFT;
                     }
-                    h->predict_16x16[intra_mode]( pix );
+                    // intra pred
+                    h->predict_16x16[intra_mode]( pixd );
+                    // residual
+                    h->dctf.sub16x16_dct8( dct, pixe, pixd );
+                    for( int i = 0; i < 4; i++ )
+                    {
+                        h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8IY][i_qp], h->quant8_bias[CQM_8IY][i_qp] );
+                        h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8IY], i_qp );
+                    }
+                    h->dctf.add16x16_idct8( pixd, dct );
                 }
                 else
                 {
@@ -1274,67 +1289,89 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     {
                         if( y == 1 ) {
                             // extend top right
-                            pixel *tr = pix + 15 + 7 * FDEC_STRIDE;
+                            pixel *tr = pixd + 15 + 7 * FDEC_STRIDE;
                             for(int i = 1; i <= 8; i++)
                                 tr[i] = tr[0];
                         }
+
                         for( int x = 0; x < 2; x++ )
                         {
-                            pixel *pix8x8 = pix + 8 * (x + y * FDEC_STRIDE);
+                            pixel *pix8x8 = pixd + 8 * (x + y * FDEC_STRIDE);
+                            pixel *src8x8 = pixe + 8 * (x + y * FENC_STRIDE);
                             pixel edge[36];
+                            // intra pred
                             h->predict_8x8_filter( pix8x8, edge, ALL_NEIGHBORS, ALL_NEIGHBORS );
                             h->predict_8x8[intra_mode]( pix8x8, edge );
+                            // residual
+                            h->dctf.sub8x8_dct8( dct[0], src8x8, pix8x8 );
+                            h->quantf.quant_8x8( dct[0], h->quant8_mf[CQM_8IY][i_qp], h->quant8_bias[CQM_8IY][i_qp] );
+                            h->quantf.dequant_8x8( dct[0], h->dequant8_mf[CQM_8IY], i_qp );
+                            h->dctf.add8x8_idct8( pix8x8, dct[0] );
                         }
                     }
                 }
-                h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
-                                         pix, FDEC_STRIDE, 16 );
-
-                continue;
             }
-
-            int16_t mvs[2][2];
-            if( list_used & 1 )
+            else
             {
-                mvs[0][0] = frame->lowres_mvs[0][b-p0-1][mb_xy][0] / 2;
-                mvs[0][1] = frame->lowres_mvs[0][b-p0-1][mb_xy][1] / 2;
-            }
-            if( p1-b > 0 && list_used & 2 )
-            {
-                mvs[1][0] = frame->lowres_mvs[0][p1-b-1][mb_xy][0] / 2;
-                mvs[1][1] = frame->lowres_mvs[0][p1-b-1][mb_xy][1] / 2;
-            }
-
-            if( list_used == 3 ) {
-                int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
-                int src_pel_offset_1 = dst_pel_offset + mvs[1][0] + mvs[1][1] * i_stride;
-                h->mc.avg[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
-                                        ref0->plane[0] + src_pel_offset_0, i_stride,
-                                        ref1->plane[0] + src_pel_offset_1, i_stride,
-                                        32 ); // XXX calculate bipred weight properly
-            } else {
-                int16_t mvx, mvy;
-                x264_frame_t *ref;
+                // TODO: do the inter predict and residual twice,
+                // once with original reference and once with compressed reference.
+                pixel *ref0buf = ref0->lookahead_recon;
+                pixel *ref1buf = ref1->lookahead_recon;
+                int16_t mvs[2][2];
                 if( list_used & 1 )
                 {
-                    mvx = mvs[0][0];
-                    mvy = mvs[0][1];
-                    ref = ref0;
+                    mvs[0][0] = frame->lowres_mvs[0][b-p0-1][mb_xy][0] / 2;
+                    mvs[0][1] = frame->lowres_mvs[0][b-p0-1][mb_xy][1] / 2;
                 }
-                else
+                if( p1-b > 0 && list_used & 2 )
                 {
-                    mvx = mvs[1][0];
-                    mvy = mvs[1][1];
-                    ref = ref1;
+                    mvs[1][0] = frame->lowres_mvs[0][p1-b-1][mb_xy][0] / 2;
+                    mvs[1][1] = frame->lowres_mvs[0][p1-b-1][mb_xy][1] / 2;
                 }
-                int src_pel_offset = dst_pel_offset + mvx + mvy * i_stride;
 
-                h->mc.copy_16x16_unaligned( frame->lookahead_recon + dst_pel_offset, i_stride,
-                                            ref->plane[0] + src_pel_offset, i_stride,
-                                            16 );
+                if( list_used == 3 ) {
+                    int src_pel_offset_0 = dst_pel_offset + mvs[0][0] + mvs[0][1] * i_stride;
+                    int src_pel_offset_1 = dst_pel_offset + mvs[1][0] + mvs[1][1] * i_stride;
+                    h->mc.avg[PIXEL_16x16]( pixd, FDEC_STRIDE,
+                                            ref0buf + src_pel_offset_0, i_stride,
+                                            ref1buf + src_pel_offset_1, i_stride,
+                                            32 ); // XXX calculate bipred weight properly
+                } else {
+                    int16_t mvx, mvy;
+                    pixel *refbuf;
+                    if( list_used & 1 )
+                    {
+                        mvx = mvs[0][0];
+                        mvy = mvs[0][1];
+                        refbuf = ref0buf;
+                    }
+                    else
+                    {
+                        mvx = mvs[1][0];
+                        mvy = mvs[1][1];
+                        refbuf = ref1buf;
+                    }
+                    int src_pel_offset = dst_pel_offset + mvx + mvy * i_stride;
+
+                    h->mc.copy_16x16_unaligned( pixd, FDEC_STRIDE,
+                                                refbuf + src_pel_offset, i_stride,
+                                                16 );
+                }
+
+                h->dctf.sub16x16_dct8( dct, pixe, pixd );
+                for( int i = 0; i < 4; i++ )
+                {
+                    h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8PY][i_qp], h->quant8_bias[CQM_8PY][i_qp] );
+                    h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8PY], i_qp );
+                }
+                h->dctf.add16x16_idct8( pixd, dct );
             }
+
+            h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
+                                     pixd, FDEC_STRIDE, 16 );
         }
     }
+    x264_frame_expand_border_lookahead_recon( frame );
 }
 
 static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int num_frames, int b_intra )
@@ -1343,6 +1380,12 @@ static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int nu
     int cur_nonb = 0;
     while( cur_nonb < num_frames && IS_X264_TYPE_B( frames[cur_nonb]->i_type ) )
         cur_nonb++;
+
+    if( IS_X264_TYPE_I(frames[cur_nonb]->i_type) )
+    {
+        slicetype_frame_cost( h, a, frames, cur_nonb, cur_nonb, cur_nonb );
+        tpl_recon_frame(h, frames, cur_nonb, cur_nonb, cur_nonb );
+    }
 
     while( cur_nonb < num_frames )
     {

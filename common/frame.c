@@ -635,6 +635,11 @@ void x264_frame_expand_border_lowres( x264_frame_t *frame )
         plane_expand_border( frame->lowres[i], frame->i_stride_lowres, frame->i_width_lowres, frame->i_lines_lowres, PADH, PADV, 1, 1, 0 );
 }
 
+void x264_frame_expand_border_lookahead_recon( x264_frame_t *frame )
+{
+    plane_expand_border( frame->lookahead_recon, frame->i_stride[0], frame->i_width[0], frame->i_lines[0], PADH, PADV, 1, 1, 0 );
+}
+
 void x264_frame_expand_border_chroma( x264_t *h, x264_frame_t *frame, int plane )
 {
     int v_shift = CHROMA_V_SHIFT;
