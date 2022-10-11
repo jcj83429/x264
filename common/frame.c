@@ -144,6 +144,8 @@ static x264_frame_t *frame_new( x264_t *h, int b_fdec )
     frame->i_cpb_delay = 0;
     frame->i_coded_fields_lookahead =
     frame->i_cpb_delay_lookahead = -1;
+    frame->i_recon_ref0 = -1;
+    frame->i_recon_ref1 = -1;
 
     frame->orig = frame;
 

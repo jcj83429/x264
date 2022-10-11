@@ -82,7 +82,6 @@ typedef struct x264_frame
     pixel *filtered[3][4]; /* plane[0], H, V, HV */
     pixel *filtered_fld[3][4];
     pixel *lowres[4]; /* half-size copy of input frame: Orig, H, V, HV */
-    pixel *lookahead_recon; /* full-res reconstructed buffer used in TPL */
     uint16_t *integral;
 
     /* for unrestricted mv we allocate more data than needed
@@ -136,13 +135,19 @@ typedef struct x264_frame
     uint16_t *i_intra_cost;
     uint16_t *i_propagate_cost;
     uint16_t *i_inv_qscale_factor;
-    int8_t  *i_lookahead_intra_mode;
-    int     *i_srcref_cost;
-    int     *i_recref_cost;
     int     b_scenecut; /* Set to zero if the frame cannot possibly be part of a real scenecut. */
     float   f_weighted_cost_delta[X264_BFRAME_MAX+2];
     uint32_t i_pixel_sum[3];
     uint64_t i_pixel_ssd[3];
+
+    /* for quant-aware mbtree/tpl */
+    int8_t  *i_lookahead_intra_mode;
+    pixel   *lookahead_recon; /* full-res reconstructed buffer */
+    int     *i_srcref_cost;
+    int     *i_recref_cost;
+    // these are used to check if the recon buffer is stale
+    int     i_recon_ref0;
+    int     i_recon_ref1;
 
     /* hrd */
     x264_hrd_t hrd_timing;

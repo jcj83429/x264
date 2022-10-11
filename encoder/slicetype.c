@@ -1225,6 +1225,9 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
     x264_frame_t *frame = frames[b];
     x264_frame_t *ref0 = frames[p0];
     x264_frame_t *ref1 = frames[p1];
+    if( frame->i_recon_ref0 == ref0->i_frame && frame->i_recon_ref1 == ref1->i_frame )
+        return; /* recon buffer is up to date */
+
     int i_stride = frame->i_stride[0];
 
     ALIGNED_ARRAY_16( pixel, pixd1,[17*FDEC_STRIDE] );
@@ -1335,9 +1338,9 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     ref1_pel_offset = dst_pel_offset + x + y * i_stride;
                 }
 
-                // Use the recon refs first and finish with the source refs.
-                // This way we put the source-referenced recon block into lookahead_recon
-                for( int use_recon_refs = 1; use_recon_refs >= 0; use_recon_refs-- )
+                // Use the source refs first and finish with the recon refs.
+                // This way we put the recon-referenced recon block into lookahead_recon
+                for( int use_recon_refs = 0; use_recon_refs <= 1; use_recon_refs++ )
                 {
                     pixel *ref0buf = use_recon_refs ? ref0->lookahead_recon : ref0->plane[0];
                     pixel *ref1buf = use_recon_refs ? ref1->lookahead_recon : ref1->plane[0];
@@ -1391,7 +1394,8 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
         }
     }
     x264_frame_expand_border_lookahead_recon( frame );
-
+    frame->i_recon_ref0 = ref0->i_frame;
+    frame->i_recon_ref1 = ref1->i_frame;
     printf("cost_src: %ld, cost_rec: %ld\n", total_cost_srcref, total_cost_recref);
 }
 
