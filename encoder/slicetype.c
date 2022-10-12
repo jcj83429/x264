@@ -1073,6 +1073,7 @@ static void macroblock_tree_finish( x264_t *h, x264_frame_t *frame, float averag
     /* Allow the strength to be adjusted via qcompress, since the two
      * concepts are very similar. */
     float strength = 5.0f * (1.0f - h->param.rc.f_qcompress);
+    float total_adj = 0;
     for( int mb_index = 0; mb_index < h->mb.i_mb_count; mb_index++ )
     {
         int intra_cost = (frame->i_intra_cost[mb_index] * frame->i_inv_qscale_factor[mb_index] + 128) >> 8;
@@ -1081,8 +1082,11 @@ static void macroblock_tree_finish( x264_t *h, x264_frame_t *frame, float averag
             int propagate_cost = (frame->i_propagate_cost[mb_index] * fps_factor + 128) >> 8;
             float log2_ratio = x264_log2(intra_cost + propagate_cost) - x264_log2(intra_cost) + weightdelta;
             frame->f_qp_offset[mb_index] = frame->f_qp_offset_aq[mb_index] - strength * log2_ratio;
+            total_adj += frame->f_qp_offset[mb_index] - frame->f_qp_offset_aq[mb_index];
         }
     }
+
+    printf("mbtree finish frame %d average adj: %f\n", frame->i_frame, total_adj / h->mb.i_mb_count );
 }
 
 static void macroblock_tree_propagate( x264_t *h, x264_frame_t **frames, float average_duration, int p0, int p1, int b, int referenced )
@@ -1396,13 +1400,83 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
     x264_frame_expand_border_lookahead_recon( frame );
     frame->i_recon_ref0 = ref0->i_frame;
     frame->i_recon_ref1 = ref1->i_frame;
-    printf("cost_src: %ld, cost_rec: %ld\n", total_cost_srcref, total_cost_recref);
+    printf("frame %d qp %d cost_src: %ld, cost_rec: %ld\n", frame->i_frame, i_qp, total_cost_srcref, total_cost_recref);
+}
+
+static void tpl_finish( x264_t *h, x264_frame_t *frame )
+{
+    float strength = 6;
+    float total_adj = 0;
+    for( int mb_index = 0; mb_index < h->mb.i_mb_count; mb_index++ )
+    {
+        int recref_cost = frame->i_recref_cost[mb_index];
+        if( recref_cost )
+        {
+            int propagate_cost = frame->i_propagate_cost[mb_index];
+            float log2_ratio = x264_log2(recref_cost + propagate_cost) - x264_log2(recref_cost);
+            frame->f_qp_offset[mb_index] = frame->f_qp_offset_aq[mb_index] - strength * log2_ratio;
+            total_adj -= strength * log2_ratio;
+        }
+    }
+
+    printf("tpl finish frame %d average adj: %f\n", frame->i_frame, total_adj / h->mb.i_mb_count );
+}
+
+static void tpl_propagate( x264_t *h, x264_frame_t **frames, int p0, int p1, int b, int referenced )
+{
+    //printf("tpl_propagate %d<-%d->%d\n", p0, b, p1 );
+    uint16_t *ref_costs[2] = {frames[p0]->i_propagate_cost,frames[p1]->i_propagate_cost};
+    int dist_scale_factor = ( ((b-p0) << 8) + ((p1-p0) >> 1) ) / (p1-p0);
+    int i_bipred_weight = h->param.analyse.b_weighted_bipred ? 64 - (dist_scale_factor>>2) : 32;
+    int16_t (*mvs[2])[2] = { b != p0 ? frames[b]->lowres_mvs[0][b-p0-1] : NULL, b != p1 ? frames[b]->lowres_mvs[1][p1-b-1] : NULL };
+    int bipred_weights[2] = {i_bipred_weight, 64 - i_bipred_weight};
+    int16_t *buf = h->scratch_buffer;
+    uint16_t *propagate_cost = frames[b]->i_propagate_cost;
+    uint16_t *lowres_costs = frames[b]->lowres_costs[b-p0][p1-b];
+    int *srcref_cost = frames[b]->i_srcref_cost;
+    int *recref_cost = frames[b]->i_recref_cost;
+
+    /* For non-reffed frames the source costs are always zero, so just memset one row and re-use it. */
+    if( !referenced )
+        memset( frames[b]->i_propagate_cost, 0, h->mb.i_mb_width * sizeof(uint16_t) );
+
+    for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
+    {
+        int mb_index = mb_y * h->mb.i_mb_stride;
+
+        for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
+        {
+            int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
+            // XXX cost
+            if( !recref_cost[mb_xy] )
+                continue;
+            float delta_cost = recref_cost[mb_xy] - srcref_cost[mb_xy];
+            float propagate_fraction = delta_cost / recref_cost[mb_xy];
+            float propagate_amount = delta_cost + propagate_fraction * propagate_cost[mb_x];
+            buf[mb_x] = X264_MIN( (int)(propagate_amount + 0.5f), 32767 );
+        }
+        if( referenced )
+            propagate_cost += h->mb.i_mb_width;
+
+        h->mc.mbtree_propagate_list( h, ref_costs[0], &mvs[0][mb_index], buf, &lowres_costs[mb_index],
+                                     bipred_weights[0], mb_y, h->mb.i_mb_width, 0 );
+        if( b != p1 )
+        {
+            h->mc.mbtree_propagate_list( h, ref_costs[1], &mvs[1][mb_index], buf, &lowres_costs[mb_index],
+                                         bipred_weights[1], mb_y, h->mb.i_mb_width, 1 );
+        }
+    }
+
+    if( h->param.rc.i_vbv_buffer_size && h->param.rc.i_lookahead && referenced )
+        tpl_finish( h, frames[b] );
 }
 
 static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int num_frames, int b_intra )
 {
-    printf("mbtree %d+%d\n", frames[0]->i_frame, num_frames);
+    printf("tpl %d+%d\n", frames[0]->i_frame, num_frames);
+    int minidx = !b_intra;
     int cur_nonb = 0;
+    int bframes = 0;
     while( cur_nonb < num_frames && IS_X264_TYPE_B( frames[cur_nonb]->i_type ) )
         cur_nonb++;
 
@@ -1412,6 +1486,7 @@ static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int nu
         tpl_recon_frame(h, frames, cur_nonb, cur_nonb, cur_nonb );
     }
 
+    // the "dispenser" part
     while( cur_nonb < num_frames )
     {
         int next_nonb = cur_nonb + 1;
@@ -1424,7 +1499,7 @@ static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int nu
         slicetype_frame_cost( h, a, frames, cur_nonb, next_nonb, next_nonb );
         tpl_recon_frame(h, frames, cur_nonb, next_nonb, next_nonb );
 
-        int bframes = next_nonb - cur_nonb;
+        bframes = next_nonb - cur_nonb;
         if( h->param.i_bframe_pyramid && bframes > 1 )
         {
             int middle = (bframes + 1)/2 + cur_nonb;
@@ -1451,8 +1526,55 @@ static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int nu
 
         cur_nonb = next_nonb;
     }
+
+    //dump_lookahead_frames( h, frames, cur_nonb + 1 );
     
-    dump_lookahead_frames( h, frames, cur_nonb + 1 );
+    // the "synthesizer" part
+    bframes = 0;
+    while( cur_nonb > minidx )
+    {
+        int last_nonb = cur_nonb - 1;
+        while( last_nonb >= minidx && IS_X264_TYPE_B( frames[last_nonb]->i_type ) )
+            last_nonb--;
+        if( last_nonb < minidx )
+            break;
+
+        memset( frames[last_nonb]->i_propagate_cost, 0, h->mb.i_mb_count * sizeof(uint16_t) );
+        bframes = cur_nonb - last_nonb;
+        if( h->param.i_bframe_pyramid && bframes > 1 )
+        {
+            int middle = (bframes + 1)/2 + last_nonb;
+            memset( frames[middle]->i_propagate_cost, 0, h->mb.i_mb_count * sizeof(uint16_t) );
+            for( int b = last_nonb+1; b < cur_nonb; b++ ) {
+                if( b == middle )
+                    continue;
+
+                int p0 = b > middle ? middle : last_nonb;
+                int p1 = b > middle ? cur_nonb : middle;
+                tpl_propagate( h, frames, p0, p1, b, 0 );
+            }
+
+            tpl_propagate( h, frames, last_nonb, cur_nonb, middle, 1 );
+        }
+        else
+        {
+            for( int b = last_nonb+1; b < cur_nonb; b++ )
+            {
+                tpl_propagate( h, frames, last_nonb, cur_nonb, b, 0 );
+            }
+        }
+        tpl_propagate( h, frames, last_nonb, cur_nonb, cur_nonb, 1 );
+
+        cur_nonb = last_nonb;
+    }
+
+    tpl_finish( h, frames[cur_nonb] );
+    if( h->param.i_bframe_pyramid && bframes > 1 && !h->param.rc.i_vbv_buffer_size )
+    {
+        int middle = cur_nonb+(bframes+1)/2;
+        tpl_finish( h, frames[middle] );
+    }
+    printf("tpl end\n");
 }
 
 static int vbv_frame_cost( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int p0, int p1, int b )
