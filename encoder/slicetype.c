@@ -1261,10 +1261,10 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
             if( !list_used )
             {
                 // copy the top and left pixels
-                memcpy(pixd - FDEC_STRIDE, frame->plane[0] + dst_pel_offset - i_stride, 24);
+                memcpy(pixd - FDEC_STRIDE, frame->lookahead_recon + dst_pel_offset - i_stride, 24);
                 for( int i = -1; i < 16; i++ )
                 {
-                    pixd[i*FDEC_STRIDE - 1] = frame->plane[0][dst_pel_offset + i*i_stride - 1];
+                    pixd[i*FDEC_STRIDE - 1] = frame->lookahead_recon[dst_pel_offset + i*i_stride - 1];
                 }
                 int intra_mode = frame->i_lookahead_intra_mode[mb_xy];
                 if( intra_mode < 3 )
@@ -1410,7 +1410,22 @@ static void tpl_finish( x264_t *h, x264_frame_t *frame )
     float total_adj = 0;
     for( int mb_index = 0; mb_index < h->mb.i_mb_count; mb_index++ )
     {
+        int x = mb_index % h->mb.i_mb_stride;
+        int y = mb_index / h->mb.i_mb_stride;
         int recref_cost = frame->i_recref_cost[mb_index];
+        // A flat block may receive propagate cost from neighbouring sharp blocks.
+        // That propagation cost is often much higher than the flat block's own recref cost.
+        // This causes an excessive log2 ratio to be given to the flat block.
+        // So take the max of the neighbouring blocks' recref costs.
+        if(x)
+            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index-1]);
+        if(x < h->mb.i_mb_stride - 1)
+            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index+1]);
+        if(y)
+            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index-h->mb.i_mb_stride]);
+        if(y < h->mb.i_mb_height - 1)
+            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index+h->mb.i_mb_stride]);
+
         if( recref_cost )
         {
             int propagate_cost = frame->i_propagate_cost[mb_index];
@@ -1531,6 +1546,9 @@ static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int nu
     //dump_lookahead_frames( h, frames, cur_nonb + 1 );
     
     // the "synthesizer" part
+    if(cur_nonb <= num_frames)
+        memset( frames[cur_nonb]->i_propagate_cost, 0, h->mb.i_mb_count * sizeof(uint16_t) );
+
     bframes = 0;
     while( cur_nonb > minidx )
     {
