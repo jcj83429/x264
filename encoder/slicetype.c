@@ -1250,6 +1250,7 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
         for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
         {
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
+            int i_mb_qp = i_qp + frame->f_qp_offset_aq[mb_xy];
             int list_used = frame->lowres_costs[b-p0][p1-b][mb_xy] >> LOWRES_COST_SHIFT;
             const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
             int cost_srcref = COST_MAX; // distortion with uncompressed reference frames
@@ -1290,8 +1291,8 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     h->dctf.sub16x16_dct8( dct, pixe, pixd );
                     for( int i = 0; i < 4; i++ )
                     {
-                        h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8IY][i_qp], h->quant8_bias[CQM_8IY][i_qp] );
-                        h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8IY], i_qp );
+                        h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8IY][i_mb_qp], h->quant8_bias[CQM_8IY][i_mb_qp] );
+                        h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8IY], i_mb_qp );
                     }
                     h->dctf.add16x16_idct8( pixd, dct );
                 }
@@ -1316,14 +1317,14 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                             h->predict_8x8[intra_mode]( pix8x8, edge );
                             // residual
                             h->dctf.sub8x8_dct8( dct[0], src8x8, pix8x8 );
-                            h->quantf.quant_8x8( dct[0], h->quant8_mf[CQM_8IY][i_qp], h->quant8_bias[CQM_8IY][i_qp] );
-                            h->quantf.dequant_8x8( dct[0], h->dequant8_mf[CQM_8IY], i_qp );
+                            h->quantf.quant_8x8( dct[0], h->quant8_mf[CQM_8IY][i_mb_qp], h->quant8_bias[CQM_8IY][i_mb_qp] );
+                            h->quantf.dequant_8x8( dct[0], h->dequant8_mf[CQM_8IY], i_mb_qp );
                             h->dctf.add8x8_idct8( pix8x8, dct[0] );
                         }
                     }
                 }
                 // For intra, the cost doesn't depends on the reference frames
-                cost_srcref = cost_recref = h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE );
+                cost_srcref = cost_recref = sqrt(h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE ));
             }
             else
             {
@@ -1374,11 +1375,11 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     h->dctf.sub16x16_dct8( dct, pixe, pixd );
                     for( int i = 0; i < 4; i++ )
                     {
-                        h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8PY][i_qp], h->quant8_bias[CQM_8PY][i_qp] );
-                        h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8PY], i_qp );
+                        h->quantf.quant_8x8( dct[i], h->quant8_mf[CQM_8PY][i_mb_qp], h->quant8_bias[CQM_8PY][i_mb_qp] );
+                        h->quantf.dequant_8x8( dct[i], h->dequant8_mf[CQM_8PY], i_mb_qp );
                     }
                     h->dctf.add16x16_idct8( pixd, dct );
-                    int cost = h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE );
+                    int cost = sqrt(h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE ));
 
                     if( use_recon_refs )
                         cost_recref = cost;
@@ -1487,12 +1488,12 @@ static void tpl( x264_t *h, x264_mb_analysis_t *a, x264_frame_t **frames, int nu
     }
 
     // the "dispenser" part
-    while( cur_nonb < num_frames )
+    while( cur_nonb <= num_frames )
     {
         int next_nonb = cur_nonb + 1;
-        while( next_nonb < num_frames && IS_X264_TYPE_B( frames[next_nonb]->i_type ) )
+        while( next_nonb <= num_frames && IS_X264_TYPE_B( frames[next_nonb]->i_type ) )
             next_nonb++;
-        if( next_nonb >= num_frames )
+        if( next_nonb > num_frames )
             break;
 
         // recon next P frame
