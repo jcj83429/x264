@@ -1250,15 +1250,18 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
         for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
         {
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
-            int i_mb_qp = i_qp + frame->f_qp_offset_aq[mb_xy];
+            int i_mb_qp = X264_MAX(i_qp + frame->f_qp_offset_aq[mb_xy], 0);
+            int i_lambda = x264_lambda_tab[ i_mb_qp ];
             int list_used = frame->lowres_costs[b-p0][p1-b][mb_xy] >> LOWRES_COST_SHIFT;
             const int dst_pel_offset = 16 * (mb_x + mb_y * i_stride);
             int cost_srcref = COST_MAX; // distortion with uncompressed reference frames
             int cost_recref = COST_MAX; // distortion with compressed reference frames
             h->mc.copy[PIXEL_16x16]( pixe, FENC_STRIDE,
                                      frame->plane[0] + dst_pel_offset, i_stride, 16 );
+            int rd_cost = COST_MAX;
 
-            if( !list_used )
+            // only allow intra on I and P
+            if( p0 == p1 || b == p1 )
             {
                 // copy the top and left pixels
                 memcpy(pixd - FDEC_STRIDE, frame->lookahead_recon + dst_pel_offset - i_stride, 24);
@@ -1316,17 +1319,27 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                             h->predict_8x8_filter( pix8x8, edge, ALL_NEIGHBORS, ALL_NEIGHBORS );
                             h->predict_8x8[intra_mode]( pix8x8, edge );
                             // residual
-                            h->dctf.sub8x8_dct8( dct[0], src8x8, pix8x8 );
-                            h->quantf.quant_8x8( dct[0], h->quant8_mf[CQM_8IY][i_mb_qp], h->quant8_bias[CQM_8IY][i_mb_qp] );
-                            h->quantf.dequant_8x8( dct[0], h->dequant8_mf[CQM_8IY], i_mb_qp );
-                            h->dctf.add8x8_idct8( pix8x8, dct[0] );
+                            int dct_idx = y * 2 + x;
+                            h->dctf.sub8x8_dct8( dct[dct_idx], src8x8, pix8x8 );
+                            h->quantf.quant_8x8( dct[dct_idx], h->quant8_mf[CQM_8IY][i_mb_qp], h->quant8_bias[CQM_8IY][i_mb_qp] );
+                            h->quantf.dequant_8x8( dct[dct_idx], h->dequant8_mf[CQM_8IY], i_mb_qp );
+                            h->dctf.add8x8_idct8( pix8x8, dct[dct_idx] );
                         }
                     }
                 }
                 // For intra, the cost doesn't depends on the reference frames
                 cost_srcref = cost_recref = sqrt(h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE ));
+                int rate = 0;
+                for(int i = 0; i < 4; i++)
+                    for(int j = 0; j < 64; j++)
+                        if(dct[i][j])
+                            rate += x264_log2(abs(dct[i][j])); // XXX need to optimize with clz
+                rd_cost = cost_srcref + rate * i_lambda;
             }
-            else
+            h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
+                                     pixd, FDEC_STRIDE, 16 );
+//            else
+            if( list_used )
             {
                 int ref0_pel_offset = 0;
                 int ref1_pel_offset = 0;
@@ -1343,6 +1356,7 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     ref1_pel_offset = dst_pel_offset + x + y * i_stride;
                 }
 
+                int inter_srcref_cost = COST_MAX;
                 // Use the source refs first and finish with the recon refs.
                 // This way we put the recon-referenced recon block into lookahead_recon
                 for( int use_recon_refs = 0; use_recon_refs <= 1; use_recon_refs++ )
@@ -1382,14 +1396,30 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
                     int cost = sqrt(h->pixf.ssd[PIXEL_16x16]( pixe, FENC_STRIDE, pixd, FDEC_STRIDE ));
 
                     if( use_recon_refs )
-                        cost_recref = cost;
+                    {
+                        int rate = 0;
+                        for(int i = 0; i < 4; i++)
+                            for(int j = 0; j < 64; j++)
+                                if(dct[i][j])
+                                    rate += x264_log2(abs(dct[i][j]));
+
+                        int inter_rd_cost = cost + rate * i_lambda;
+
+                        if(inter_rd_cost < rd_cost)
+                        {
+                            cost_recref = cost;
+                            cost_srcref = inter_srcref_cost;
+                            h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
+                                                     pixd, FDEC_STRIDE, 16 );
+                        }
+                    }
                     else
-                        cost_srcref = cost;
+                    {
+                        inter_srcref_cost = cost;
+                    }
                 }
             }
 
-            h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
-                                     pixd, FDEC_STRIDE, 16 );
             if( cost_srcref > cost_recref )
                 cost_srcref = cost_recref;
             total_cost_srcref += cost_srcref;
@@ -1429,9 +1459,11 @@ static void tpl_finish( x264_t *h, x264_frame_t *frame )
         if( recref_cost )
         {
             int propagate_cost = frame->i_propagate_cost[mb_index];
-            float log2_ratio = x264_log2(recref_cost + propagate_cost) - x264_log2(recref_cost);
+            float ratio = (float)(recref_cost + propagate_cost) / recref_cost;
+            // soft-cap the ratio at 8
+            float log2_ratio = x264_log2( (ratio + 1) / (ratio * 0.125 + 1) );
             frame->f_qp_offset[mb_index] = frame->f_qp_offset_aq[mb_index] - strength * log2_ratio;
-            total_adj -= strength * log2_ratio;
+            total_adj += frame->f_qp_offset[mb_index] - frame->f_qp_offset_aq[mb_index];
         }
     }
 
