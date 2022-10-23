@@ -1436,32 +1436,16 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
 
 static void tpl_finish( x264_t *h, x264_frame_t *frame )
 {
-    float strength = 6;
+    float strength = 4;
     float total_adj = 0;
     for( int mb_index = 0; mb_index < h->mb.i_mb_count; mb_index++ )
     {
-        int x = mb_index % h->mb.i_mb_stride;
-        int y = mb_index / h->mb.i_mb_stride;
         int recref_cost = frame->i_recref_cost[mb_index];
-        // A flat block may receive propagate cost from neighbouring sharp blocks.
-        // That propagation cost is often much higher than the flat block's own recref cost.
-        // This causes an excessive log2 ratio to be given to the flat block.
-        // So take the max of the neighbouring blocks' recref costs.
-        if(x)
-            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index-1]);
-        if(x < h->mb.i_mb_stride - 1)
-            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index+1]);
-        if(y)
-            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index-h->mb.i_mb_stride]);
-        if(y < h->mb.i_mb_height - 1)
-            recref_cost = X264_MAX(recref_cost, frame->i_recref_cost[mb_index+h->mb.i_mb_stride]);
-
         if( recref_cost )
         {
             int propagate_cost = frame->i_propagate_cost[mb_index];
             float ratio = (float)(recref_cost + propagate_cost) / recref_cost;
-            // soft-cap the ratio at 8
-            float log2_ratio = x264_log2( (ratio + 1) / (ratio * 0.125 + 1) );
+            float log2_ratio = x264_log2( ratio );
             frame->f_qp_offset[mb_index] = frame->f_qp_offset_aq[mb_index] - strength * log2_ratio;
             total_adj += frame->f_qp_offset[mb_index] - frame->f_qp_offset_aq[mb_index];
         }
