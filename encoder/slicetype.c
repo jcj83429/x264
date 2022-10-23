@@ -1338,7 +1338,7 @@ static void tpl_recon_frame( x264_t *h, x264_frame_t **frames, int p0, int p1, i
             }
             h->mc.copy[PIXEL_16x16]( frame->lookahead_recon + dst_pel_offset, i_stride,
                                      pixd, FDEC_STRIDE, 16 );
-//            else
+
             if( list_used )
             {
                 int ref0_pel_offset = 0;
@@ -1488,11 +1488,11 @@ static void tpl_propagate( x264_t *h, x264_frame_t **frames, int p0, int p1, int
     if( !referenced )
         memset( frames[b]->i_propagate_cost, 0, h->mb.i_mb_width * sizeof(uint16_t) );
 
-    for( int mb_y = h->mb.i_mb_height - 1; mb_y >= 0; mb_y-- )
+    for( int mb_y = 0; mb_y < h->mb.i_mb_height; mb_y++ )
     {
         int mb_index = mb_y * h->mb.i_mb_stride;
 
-        for( int mb_x =  h->mb.i_mb_width - 1; mb_x >= 0; mb_x-- )
+        for( int mb_x = 0; mb_x < h->mb.i_mb_width; mb_x++ )
         {
             int mb_xy = mb_y * h->mb.i_mb_width + mb_x;
             // XXX cost
